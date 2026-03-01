@@ -1,6 +1,7 @@
 import pygame
 import math
 import random
+import heapq
 
 pygame.init()
 winWidth, winHeight = 1000, 700 
@@ -9,9 +10,10 @@ window = pygame.display.set_mode((winWidth, winHeight))
 pygame.display.set_caption("Dynamic Pathfinding Agent")
 
 fontSmall = pygame.font.SysFont('Arial', 14)
-fontMed = pygame.font.SysFont('Arial', 18, bold=True)
-
-themes = {"Light": {"bg": (255, 255, 255), "vis": (180, 160, 255), "front": (255, 255, 0), "path": (0, 255, 0), "wall": (0, 0, 0)}}
+themes = {
+    "Light": {"bg": (255, 255, 255), "vis": (180, 160, 255), "front": (255, 255, 0), "path": (0, 255, 0), "wall": (0, 0, 0)},
+    "Dark":  {"bg": (50, 50, 50),    "vis": (0, 0, 0),       "front": (255, 165, 0), "path": (0, 255, 255), "wall": (255, 255, 255)},
+}
 colorWall, colorStart, colorGoal = (100, 108, 128), (0, 0, 255), (128, 0, 128)    
 
 class Node:
@@ -24,96 +26,106 @@ class Node:
         self.neighbors = [] 
 
     def draw(self, window, currTheme):
-        color = themes[currTheme]["bg"]
+        themeDict = themes[currTheme]
+        color = themeDict["bg"]
         if self.isWall: color = colorWall
         elif self.isStart: color = colorStart
         elif self.isGoal: color = colorGoal
+        elif self.isPath: color = themeDict["path"]
+        elif self.isVisited: color = themeDict["vis"]
+        elif self.isFrontier: color = themeDict["front"]
+
         rect = pygame.Rect(self.x, self.y, self.width, self.width)
         pygame.draw.rect(window, color, rect)
         pygame.draw.rect(window, (150, 150, 150), rect, 1)
 
-def makeGrid(rows, cols):
-    grid = []
-    cellWidth = min((winWidth - sidebarWidth) // cols, winHeight // rows)
-    for i in range(rows):
-        grid.append([Node(i, j, cellWidth) for j in range(cols)])
-    return grid
+    def getNeighbors(self, grid, totalRows, totalCols):
+        self.neighbors = []
+        if self.row < totalRows - 1 and not grid[self.row + 1][self.col].isWall: self.neighbors.append(grid[self.row + 1][self.col])
+        if self.row > 0 and not grid[self.row - 1][self.col].isWall: self.neighbors.append(grid[self.row - 1][self.col])
+        if self.col < totalCols - 1 and not grid[self.row][self.col + 1].isWall: self.neighbors.append(grid[self.row][self.col + 1])
+        if self.col > 0 and not grid[self.row][self.col - 1].isWall: self.neighbors.append(grid[self.row][self.col - 1])
 
-def drawButton(window, x, y, w, h, text, isActive):
-    color = (100, 255, 100) if isActive else (180, 180, 180)
-    btnRect = pygame.Rect(x, y, w, h)
-    pygame.draw.rect(window, color, btnRect)
-    pygame.draw.rect(window, (0, 0, 0), btnRect, 2)
-    window.blit(fontSmall.render(text, True, (0, 0, 0)), (x + 5, y + 2))
-    return btnRect
+def makeGrid(rows, cols): return [[Node(i, j, min((winWidth - sidebarWidth) // cols, winHeight // rows)) for j in range(cols)] for i in range(rows)]
 
-def checkReachability(grid, startNode, goalNode, rows, cols):
-    queue, visited = [startNode], {startNode}
-    while queue:
-        curr = queue.pop(0)
-        if curr == goalNode: return True
-        for dr, dc in [(1,0), (-1,0), (0,1), (0,-1)]:
-            nr, nc = curr.row + dr, curr.col + dc
-            if 0 <= nr < rows and 0 <= nc < cols:
-                neighbor = grid[nr][nc]
-                if not neighbor.isWall and neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append(neighbor)
-    return False
+def calcHeuristic(node1, node2, heurType):
+    x1, y1, x2, y2 = node1.row, node1.col, node2.row, node2.col
+    if heurType == "Manhattan": return abs(x1 - x2) + abs(y1 - y2)
+    return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
 
-def generateRandomMaze(grid, rows, cols, density):
+def clearVisuals(grid):
     for r in grid:
-        for node in r: node.isWall = node.isStart = node.isGoal = False
-    startNode = grid[random.randint(0, rows//3)][random.randint(0, cols//3)]
-    goalNode = grid[random.randint(rows - rows//3 - 1, rows-1)][random.randint(cols - cols//3 - 1, cols-1)]
-    startNode.isStart, goalNode.isGoal = True, True
+        for node in r: node.isVisited = node.isFrontier = node.isPath = False
 
-    targetWalls = int((rows * cols - 2) * density)
-    wallsPlaced, attempts = 0, 0
-    while wallsPlaced < targetWalls and attempts < targetWalls * 5:
-        node = grid[random.randint(0, rows-1)][random.randint(0, cols-1)]
-        if not node.isStart and not node.isGoal and not node.isWall:
-            node.isWall = True
-            if checkReachability(grid, startNode, goalNode, rows, cols): wallsPlaced += 1
-            else: node.isWall = False 
-        attempts += 1
-    return startNode, goalNode
+def reconstructPath(cameFrom, current, drawFunc):
+    path = []
+    while current in cameFrom:
+        path.append(current)
+        current = cameFrom[current]
+        if not current.isStart: current.isPath = True
+        drawFunc()
+    return path
+
+def runAlgorithm(drawFunc, grid, startNode, goalNode, algoType, heurType, delay, rows, cols):
+    clearVisuals(grid)
+    for r in grid:
+        for node in r: node.getNeighbors(grid, rows, cols)
+            
+    count = 0
+    openSet = []
+    heapq.heappush(openSet, (0, count, startNode)) 
+    cameFrom = {}
+    gScore = {node: float("inf") for r in grid for node in r}
+    gScore[startNode] = 0
+    fScore = {node: float("inf") for r in grid for node in r}
+    fScore[startNode] = calcHeuristic(startNode, goalNode, heurType)
+    openSetHash = {startNode} 
+    
+    while openSet:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT: pygame.quit(); return []
+                
+        current = heapq.heappop(openSet)[2]
+        openSetHash.remove(current)
+        if current == goalNode: return reconstructPath(cameFrom, goalNode, drawFunc)
+            
+        for neighbor in current.neighbors:
+            tempGScore = gScore[current] + 1
+            if tempGScore < gScore[neighbor]:
+                cameFrom[neighbor] = current
+                gScore[neighbor] = tempGScore
+                fScore[neighbor] = tempGScore + calcHeuristic(neighbor, goalNode, heurType) if algoType == "A*" else calcHeuristic(neighbor, goalNode, heurType)
+                if neighbor not in openSetHash:
+                    count += 1
+                    heapq.heappush(openSet, (fScore[neighbor], count, neighbor))
+                    openSetHash.add(neighbor)
+                    neighbor.isFrontier = True
+        drawFunc()
+        if current != startNode: current.isVisited = True; current.isFrontier = False
+    return []
 
 def main():
-    cols, rows, mazeDensity = 12, 12, 0.3
-    currTool = "wall" 
+    cols, rows, speed, currAlgo, currHeur = 12, 12, 20, "A*", "Manhattan"
     grid = makeGrid(rows, cols)
     startNode = goalNode = None
     running = True
 
     def drawAll():
         window.fill((230, 230, 230)) 
-        btnStart = drawButton(window, 10, 130, 130, 20, "Set Start (S)", currTool == "start")
-        btnGoal = drawButton(window, 150, 130, 130, 20, "Set Goal (G)", currTool == "goal")
-        btnWall = drawButton(window, 10, 155, 130, 20, "Draw Wall", currTool == "wall")
-        btnErase = drawButton(window, 150, 155, 130, 20, "Erase", currTool == "erase")
-        btnRandom = drawButton(window, 40, 530, 220, 25, "  GENERATE RANDOM MAZE", False)
-        
+        btnRun = pygame.Rect(40, 590, 220, 35)
+        pygame.draw.rect(window, (180, 180, 180), btnRun)
+        window.blit(fontSmall.render("START ALGORITHM", True, (0, 0, 0)), (45, 595))
         for r in grid:
             for n in r: n.draw(window, "Light")
         pygame.display.update()
-        return {"start": btnStart, "goal": btnGoal, "wall": btnWall, "erase": btnErase, "random": btnRandom}
+        return {"run": btnRun}
 
     while running:
         buttons = drawAll()
         for event in pygame.event.get():
             if event.type == pygame.QUIT: running = False
-            if pygame.mouse.get_pressed()[0]: 
-                x, y = pygame.mouse.get_pos()
-                if x < sidebarWidth:
-                    if buttons["start"].collidepoint(x, y): currTool = "start"
-                    elif buttons["wall"].collidepoint(x, y): currTool = "wall"
-                    elif buttons["random"].collidepoint(x, y): startNode, goalNode = generateRandomMaze(grid, rows, cols, mazeDensity)
-                else:
-                    cellW = grid[0][0].width
-                    r, c = y // cellW, (x - sidebarWidth) // cellW
-                    if r < rows and c < cols:
-                        if currTool == "wall": grid[r][c].isWall = True
+            if pygame.mouse.get_pressed()[0] and buttons["run"].collidepoint(pygame.mouse.get_pos()):
+                if startNode and goalNode: runAlgorithm(lambda: drawAll(), grid, startNode, goalNode, currAlgo, currHeur, speed, rows, cols)
     pygame.quit()
 
 if __name__ == "__main__":
